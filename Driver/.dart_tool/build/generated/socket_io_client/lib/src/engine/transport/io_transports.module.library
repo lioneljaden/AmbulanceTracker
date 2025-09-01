@@ -1,0 +1,1 @@
+{"isEntrypoint":false,"deps":["socket_io_client|lib/src/engine/transport/io_websocket_transport.dart","socket_io_client|lib/src/engine/transport.dart"],"parts":[],"conditionalDeps":[],"sdkDeps":[],"hasMain":false}

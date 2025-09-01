@@ -1,0 +1,1 @@
+{"isEntrypoint":true,"deps":["socket_io_common|lib/src/engine/parser/parser.dart","socket_io_common|lib/src/parser/binary.dart","socket_io_common|lib/src/parser/parser.dart"],"parts":[],"conditionalDeps":[],"sdkDeps":[],"hasMain":false}

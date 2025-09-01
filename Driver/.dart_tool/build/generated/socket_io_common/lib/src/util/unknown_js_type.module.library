@@ -1,0 +1,1 @@
+{"isEntrypoint":false,"deps":[],"parts":[],"conditionalDeps":[{"$default":"socket_io_common|lib/src/util/js_type_adapter.dart","dart.library.js_interop":"socket_io_common|lib/src/util/js_interop_type_adapter.dart"}],"sdkDeps":[],"hasMain":false}

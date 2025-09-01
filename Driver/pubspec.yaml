@@ -1,0 +1,13 @@
+name: live_tracker_driver
+description: The driver-side application for the emergency services app.
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  js: ^0.7.1
+  # Upgraded to the version suggested by the error to resolve the conflict
+  socket_io_client: ^3.0.0 
+
+dev_dependencies:
+  build_runner: ^2.4.6
+  build_web_compilers: ^4.0.7

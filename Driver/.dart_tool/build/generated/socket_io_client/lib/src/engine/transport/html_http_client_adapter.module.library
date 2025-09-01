@@ -1,0 +1,1 @@
+{"isEntrypoint":false,"deps":["web|lib/web.dart","socket_io_client|lib/src/engine/transport/http_client_adapter.dart"],"parts":[],"conditionalDeps":[],"sdkDeps":[],"hasMain":false}

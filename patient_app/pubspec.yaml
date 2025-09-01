@@ -1,0 +1,39 @@
+name: patient_app
+description: The patient-side application for the emergency services app, built with Flutter.
+
+publish_to: 'none' 
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # For making HTTP requests to Geoapify
+  http: ^1.2.1
+
+  # For native maps
+  flutter_map: ^8.2.1
+
+  # For map coordinates
+  latlong2: ^0.9.1
+
+  # For accessing the device's GPS
+  geolocator: ^14.0.2
+
+  # For real-time communication with the server
+  socket_io_client: ^2.0.3+1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  
+  # For better code analysis
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+

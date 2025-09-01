@@ -1,0 +1,1 @@
+{"isEntrypoint":false,"deps":["socket_io_common|lib/src/util/unknown_js_type.dart","socket_io_common|lib/src/engine/parser/commons.dart"],"parts":[],"conditionalDeps":[],"sdkDeps":["convert","typed_data"],"hasMain":false}

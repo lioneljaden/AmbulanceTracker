@@ -22,6 +22,20 @@ class Place {
   Place(this.name, this.latitude, this.longitude);
 }
 
+// A helper class to simplify the data sent over Socket.IO
+class SimpleRoute {
+  final Place pickup;
+  final Place dropoff;
+  SimpleRoute(this.pickup, this.dropoff);
+
+  // Convert to a format that can be sent as JSON
+  Map<String, dynamic> toJson() => {
+    'pickup': {'name': pickup.name, 'lat': pickup.latitude, 'lng': pickup.longitude},
+    'dropoff': {'name': dropoff.name, 'lat': dropoff.latitude, 'lng': dropoff.longitude}
+  };
+}
+
+
 // --- JS Interop Definitions ---
 extension on Map<String, JSAny?> { JSObject toJSObject() { final obj = js_util.newObject<JSObject>(); forEach((key, value) { js_util.setProperty(obj, key, value); }); return obj; } }
 @JS('L') external JSObject get _l;
@@ -74,7 +88,6 @@ JSMap? _map;
 JSControl? _currentRoutingControl;
 JSMarker? _ambulanceMarker;
 IO.Socket? _socket;
-JSObject? _currentRoute;
 
 
 // --- Main Initialization Function ---
@@ -109,9 +122,11 @@ void _setupSocketConnection() {
         final driverInfo = querySelector('#driver-info') as ParagraphElement?;
         statusPanel?.style.display = 'block';
         driverInfo?.text = 'Driver: ${data['driverName']} | Vehicle: ${data['vehicle']}';
+        // Create the initial ambulance marker at the pickup spot
         _createOrUpdateAmbulanceMarker(_pickupPlace!.latitude, _pickupPlace!.longitude);
     });
 
+    // Listen for live location updates for the ambulance
     _socket!.on('ambulance-location-update', (data) {
         _createOrUpdateAmbulanceMarker(data['lat'], data['lng']);
     });
@@ -186,15 +201,15 @@ void _setupEmergencyListeners() {
 }
 
 void _setupBookingConfirmationListeners() {
-    // We need to query for the buttons again because they might be rebuilt.
     final confirmBtn = querySelector('#confirm-booking-btn');
     final cancelBtn = querySelector('#cancel-booking-btn');
     final cancelRideBtn = querySelector('#cancel-ride-btn');
 
     confirmBtn?.onClick.listen((_) {
-        if (_currentRoute != null) {
-            _socket?.emit('request-booking', {'route': js_util.dartify(_currentRoute!)});
-            (querySelector('#confirmation-panel') as DivElement?)?.innerHtml = '<p>Searching for nearby drivers...</p><div class="loader"></div>';
+        if (_pickupPlace != null && _dropPlace != null) {
+          final simpleRoute = SimpleRoute(_pickupPlace!, _dropPlace!);
+          _socket?.emit('request-booking', simpleRoute.toJson());
+          (querySelector('#confirmation-panel') as DivElement?)?.innerHtml = '<p>Searching for nearby drivers...</p><div class="loader"></div>';
         }
     });
 
@@ -284,13 +299,11 @@ void _displayRoute(Place start, Place end) {
     _currentRoutingControl!.on('routesfound'.toJS, js_util.allowInterop((e) {
         final routes = js_util.getProperty(e, 'routes') as JSArray;
         if (routes.length > 0) {
+            final etaInfo = querySelector('#eta-info') as ParagraphElement?;
             final route = js_util.getProperty(routes, 0);
-            _currentRoute = route;
             final summary = js_util.getProperty(route, 'summary');
             final totalTime = js_util.getProperty(summary, 'totalTime');
             final eta = (totalTime as JSNumber).toDartDouble / 60;
-
-            final etaInfo = querySelector('#eta-info') as ParagraphElement?;
             etaInfo?.text = 'Estimated Time: ${eta.ceil()} mins';
             
             (querySelector('.booking-panel') as DivElement?)?.style.display = 'none';
@@ -337,6 +350,8 @@ void _resetToBooking() {
     _initializeMap();
 }
 
+// This new function will create the ambulance marker when a booking is accepted
+// and move it when new location data arrives.
 void _createOrUpdateAmbulanceMarker(double lat, double lng) {
     final ambulanceIcon = _l.icon(<String, JSAny?>{
         'iconUrl': 'https://cdn-icons-png.flaticon.com/128/2929/2929339.png'.toJS,
