@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emergency Medical Services</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+    <script src="main.dart.js"></script>
+    <style>
+        :root {
+            --primary-color: #007bff;
+            --danger-color: #dc3545;
+            --light-grey: #f8f9fa;
+            --dark-grey: #6c757d;
+        }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--light-grey);
+            overflow: hidden; /* Prevent scrolling */
+        }
+        #map {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+        .ui-panel {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            width: 90%;
+            max-width: 400px;
+            box-sizing: border-box;
+        }
+        .input-group {
+            margin-bottom: 15px;
+            position: relative; /* Needed for z-index on autocomplete */
+        }
+        .input-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: var(--dark-grey);
+            font-weight: 500;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            background-color: var(--primary-color);
+            color: white;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        #emergency-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 10;
+            width: auto;
+            background-color: var(--danger-color);
+            padding: 10px 15px;
+        }
+        #emergency-btn:hover {
+            background-color: #b22222;
+        }
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+        }
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 400px;
+            box-sizing: border-box;
+        }
+        .modal-content h2 { margin-top: 0; }
+
+        .autocomplete-container {
+            position: relative;
+        }
+        .autocomplete-results {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: white;
+            border: 1px solid #ccc;
+            border-top: none;
+            border-radius: 0 0 8px 8px;
+            z-index: 1000; /* High z-index to appear on top */
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .autocomplete-results div {
+            padding: 10px;
+            cursor: pointer;
+        }
+        .autocomplete-results div:hover {
+            background-color: #f1f1f1;
+        }
+        .confirmation-panel, .status-panel {
+             display: none;
+             text-align: center;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid var(--primary-color);
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        #back-to-booking-btn {
+            position: absolute; 
+            top: 80px; 
+            left: 20px; 
+            z-index: 10; 
+            width: auto; 
+            display: none;
+            background-color: white;
+            color: black;
+            border: 1px solid #ccc;
+            padding: 8px 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div class="ui-panel booking-panel">
+        <div class="input-group autocomplete-container">
+            <label for="pickup-input">Pickup Location</label>
+            <input type="text" id="pickup-input" placeholder="Enter pickup address">
+            <div class="autocomplete-results" id="pickup-autocomplete"></div>
+        </div>
+        <div class="input-group autocomplete-container">
+            <label for="drop-input">Drop-off Location</label>
+            <input type="text" id="drop-input" placeholder="Enter drop-off address">
+            <div class="autocomplete-results" id="drop-autocomplete"></div>
+        </div>
+        <button id="find-route-btn">Find Route</button>
+    </div>
+
+    <div class="ui-panel confirmation-panel" id="confirmation-panel">
+        <h3>Confirm Booking</h3>
+        <p id="eta-info">Calculating ETA...</p>
+        <button id="confirm-booking-btn">Confirm Booking</button>
+        <button id="cancel-booking-btn" style="background-color: var(--dark-grey); margin-top: 10px;">Cancel</button>
+    </div>
+
+    <div class="ui-panel status-panel" id="status-panel">
+        <h3>Ambulance on its way!</h3>
+        <p id="driver-info">Fetching driver details...</p>
+        <button id="cancel-ride-btn" style="background-color: var(--danger-color); margin-top: 10px;">Cancel Ride</button>
+    </div>
+
+    <button id="back-to-booking-btn">Back</button>
+    <button id="emergency-btn">EMERGENCY</button>
+
+    <div class="modal-overlay" id="emergency-modal-overlay">
+        <div class="modal-content">
+            <h2>Emergency Pickup</h2>
+            <div class="input-group autocomplete-container">
+                <label for="emergency-address-input">Enter Pickup Address</label>
+                <input type="text" id="emergency-address-input" placeholder="Type address or use current location">
+                <div class="autocomplete-results" id="emergency-autocomplete-results"></div>
+            </div>
+            <button id="emergency-book-btn" style="margin-top: 10px;">Find Nearest Hospital</button>
+            <button id="emergency-current-location-btn" style="background-color: var(--dark-grey); margin-top: 10px;">Use My Current Location</button>
+            <button id="close-modal-btn" style="background: none; color: var(--dark-grey); margin-top: 15px;">Close</button>
+        </div>
+    </div>
+</body>
+</html>
+

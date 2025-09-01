@@ -1,0 +1,8 @@
+# This file provides explicit instructions to the Dart build system.
+# It helps resolve asset generation issues by specifying exactly what to build.
+targets:
+  $default:
+    builders:
+      build_web_compilers:entrypoint:
+        generate_for:
+          - web/main.dart

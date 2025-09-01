@@ -1,0 +1,12 @@
+# Node.js dependencies
+/server/node_modules
+
+# Dart/Flutter build artifacts
+/client/.dart_tool/
+/client/build/
+/client/.packages
+/client/.pub-cache/
+
+# General OS files
+.DS_Store
+Thumbs.db
