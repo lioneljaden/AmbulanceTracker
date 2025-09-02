@@ -432,7 +432,7 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
 
     try {
       final hospital = await _findNearestHospital(pickup.location.latitude, pickup.location.longitude);
-      if (hospital != null) {
+      if (hospital != null && mounted) {
         setState(() => _dropPlace = hospital);
         _displayRoute(pickup, hospital);
       } else {
@@ -448,7 +448,6 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
   Future<Place?> _findNearestHospital(double lat, double lng) async {
     // ATTEMPT 1: Geoapify (Primary)
     try {
-      // FIX: Ask for more results to increase chances of finding one.
       final url = 'https://api.geoapify.com/v2/places?categories=healthcare.hospital,healthcare.clinic&filter=circle:$lng,$lat,25000&bias=proximity:$lng,$lat&limit=20&apiKey=$geoapifyApiKey';
       final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 7));
       if (response.statusCode == 200) {
@@ -464,14 +463,12 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
 
     // ATTEMPT 2: Nominatim (Fallback)
     try {
-      print("Falling back to Nominatim for hospital search...");
-      final bbox = LatLngBounds(LatLng(lat-0.2, lng-0.2), LatLng(lat+0.2, lng+0.2));
-      final url = 'https://nominatim.openstreetmap.org/search?q=hospital&format=jsonv2&limit=20&viewbox=${bbox.west},${bbox.south},${bbox.east},${bbox.north}&bounded=1';
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Primary search failed. Trying backup...'), duration: Duration(seconds: 1)));
+      final url = 'https://nominatim.openstreetmap.org/search?q=hospital&format=jsonv2&limit=20&viewbox=${lng-0.2},${lat+0.2},${lng+0.2},${lat-0.2}&bounded=1';
       final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 7));
       if (response.statusCode == 200) {
         final results = jsonDecode(response.body) as List<dynamic>;
         if (results.isNotEmpty) {
-          // Find the closest result from the list
           Place? closest;
           double? minDistance;
           for(var result in results) {

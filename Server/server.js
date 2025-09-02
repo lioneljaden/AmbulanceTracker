@@ -12,27 +12,19 @@ const io = new Server(server, {
   }
 });
 
-// --- In-memory state management ---
-let availableDrivers = []; // Pool of real drivers waiting for a ride
-let activeRides = {}; // Maps patientId to ride details
+let availableDrivers = [];
+let activeRides = {};
 
-// --- Helper Functions ---
 function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = deg2rad(lat2 - lat1);
   const dLon = deg2rad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
-
 function deg2rad(deg) { return deg * (Math.PI / 180); }
 
-
-// --- Socket.IO Connection Logic ---
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
 
@@ -42,7 +34,6 @@ io.on('connection', (socket) => {
     if (existingDriverIndex > -1) {
       availableDrivers[existingDriverIndex].location = driverData.location;
     } else {
-      // Only add drivers if they have provided a location
       if(driverData.location) {
         availableDrivers.push({ id: socket.id, ...driverData });
       }
@@ -55,13 +46,10 @@ io.on('connection', (socket) => {
     const pickupLocation = data.pickup;
 
     if (!pickupLocation || !pickupLocation.lat || !pickupLocation.lng) {
-      console.error("Invalid pickup location data received.");
-      return;
+      return console.error("Invalid pickup location data received.");
     }
 
-    // Find the closest driver from the pool of REAL drivers
     const driversWithLocation = availableDrivers.filter(d => d.location);
-
     if (driversWithLocation.length > 0) {
       let closestDriver = driversWithLocation.reduce((prev, curr) => {
         const prevDistance = getDistanceFromLatLonInKm(pickupLocation.lat, pickupLocation.lng, prev.location.lat, prev.location.lng);
@@ -69,25 +57,33 @@ io.on('connection', (socket) => {
         return (prevDistance < currDistance) ? prev : curr;
       });
       
-      // Remove the chosen driver from the available pool
       availableDrivers = availableDrivers.filter(driver => driver.id !== closestDriver.id);
       
-      const rideDetails = { patientId: socket.id, driverId: closestDriver.id, route: data, status: 'active' };
+      const rideDetails = { patientId: socket.id, driverId: closestDriver.id, route: data, status: 'en_route_to_pickup' };
       activeRides[socket.id] = rideDetails;
       
-      const driverInfo = { driverName: closestDriver.name, vehicle: closestDriver.vehicle };
+      const driverInfo = { driverName: closestDriver.name, vehicle: closestDriver.vehicle, driverLocation: closestDriver.location };
       
       console.log(`Assigning ride to REAL driver ${closestDriver.id}.`);
       
-      // Notify the patient that the ride was accepted
       io.to(rideDetails.patientId).emit('booking-accepted', driverInfo);
-      // Send the start command to the chosen driver
       io.to(closestDriver.id).emit('start-ride', rideDetails);
       
     } else {
       console.log('No drivers available for patient:', socket.id);
       io.to(socket.id).emit('no-drivers-available');
     }
+  });
+
+  // NEW: Event for when the driver picks up the patient
+  socket.on('driver-picked-up-patient', (data) => {
+      const patientId = data.patientId;
+      if (patientId && activeRides[patientId]) {
+          console.log(`Driver picked up patient ${patientId}. Journey to hospital begins.`);
+          activeRides[patientId].status = 'en_route_to_hospital';
+          // Notify the patient that the next leg of the journey has started
+          io.to(patientId).emit('en-route-to-hospital');
+      }
   });
 
   socket.on('driver-location-update', (data) => {
@@ -103,18 +99,15 @@ io.on('connection', (socket) => {
           console.log(`Ride finished for patient ${patientId}`);
           io.to(patientId).emit('ride-finished');
           delete activeRides[patientId];
-          // Add the driver back to the available pool with their new location
           availableDrivers.push({ id: socket.id, name: 'Real Driver', location: data.location }); 
       }
   });
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-    // If a driver disconnects, remove them from the pool
     availableDrivers = availableDrivers.filter(driver => driver.id !== socket.id);
   });
 });
-
 
 const PORT = 3000;
 server.listen(PORT, () => {
