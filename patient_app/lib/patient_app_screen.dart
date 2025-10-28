@@ -1,17 +1,19 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math'; // Import the math library for 'min' function
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
+import 'package:uuid/uuid.dart'; // Import the new package
 
 // --- CONFIGURATION ---
 const geoapifyApiKey = '1184478395cc4017a33a122f110602b7';
 // IMPORTANT: Replace with your PC's local IP address to test on a physical device.
 // Use 'http://10.0.2.2:3000' for the Android emulator.
-const serverUrl = 'http://10.0.2.2:3000';
+const serverUrl = 'http://10.0.2.2:3000'; // Example for emulator
 
 
 // --- Data Models ---
@@ -19,6 +21,9 @@ class Place {
   final String name;
   final LatLng location;
   Place(this.name, this.location);
+
+  @override
+  String toString() => 'Place(name: $name, location: $location)';
 }
 
 class SimpleRoute {
@@ -49,7 +54,8 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
   Place? _pickupPlace;
   Place? _dropPlace;
 
-  List<LatLng> _routePoints = [];
+  List<LatLng> _routePoints = []; // Original route (Pickup -> Dropoff)
+  List<LatLng> _ambulanceRoutePoints = []; // --- NEW: Live route from driver
   List<Marker> _markers = [];
   Marker? _ambulanceMarker;
 
@@ -67,10 +73,14 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
   Timer? _debounce;
   String? _activeInputField;
 
+  // NEW: A permanent, unique ID for this patient/device
+  final String _myPermanentId = Uuid().v4();
+
   @override
   void initState() {
     super.initState();
     _setupSocketConnection();
+    _initializeCurrentLocation();
   }
 
   @override
@@ -83,29 +93,102 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
   }
 
   void _setupSocketConnection() {
-    _socket = IO.io(serverUrl, IO.OptionBuilder()
-        .setTransports(['websocket']).disableAutoConnect().build());
-    _socket!.connect();
-    _socket!.onConnect((_) => print('Connected to server: ${_socket!.id}'));
-    _socket!.on('booking-accepted', (data) {
-      if (mounted) setState(() {
-        _currentState = AppState.status;
-        _driverInfo = 'Driver: ${data['driverName']} | Vehicle: ${data['vehicle']}';
-        _addAmbulanceMarker(_pickupPlace!.location);
+    try {
+      _socket = IO.io(serverUrl, IO.OptionBuilder()
+          .setTransports(['websocket'])
+          .enableReconnection()
+          .disableAutoConnect()
+          .build());
+
+      // --- NEW: More detailed debug logs ---
+      _socket!.onConnect((_) => print('PATIENT: Connected to server: ${_socket!.id} (My ID: $_myPermanentId)'));
+      _socket!.onConnectError((data) => print('PATIENT: Connection Error: $data'));
+      _socket!.onError((data) => print('PATIENT: Socket Error: $data'));
+      _socket!.onDisconnect((_) => print('PATIENT: Disconnected from server.'));
+      _socket!.onReconnectAttempt((attempt) => print('PATIENT: Reconnecting... (attempt $attempt)'));
+      _socket!.onReconnect((_) => print('PATIENT: Reconnected!'));
+      // --- END NEW ---
+
+      _socket!.on('booking-accepted', (data) {
+        if (mounted) setState(() {
+          print('PATIENT: Booking accepted!');
+          _currentState = AppState.status;
+          _driverInfo = 'Driver: ${data['driverName']} | Vehicle: ${data['vehicle']}';
+          if (data['driverLocation'] != null) {
+            _addAmbulanceMarker(LatLng(data['driverLocation']['lat'], data['driverLocation']['lng']));
+          } else if (_pickupPlace != null) {
+            // Fallback if location not sent
+            _addAmbulanceMarker(_pickupPlace!.location);
+          } else {
+            print("PATIENT: Error: _pickupPlace was null when booking accepted.");
+          }
+        });
       });
-    });
-    _socket!.on('ambulance-location-update', (data) {
-      if (mounted) _addAmbulanceMarker(LatLng(data['lat'], data['lng']));
-    });
-    _socket!.on('ride-finished', (_) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You have arrived!')));
-      _resetToBooking();
-    });
+
+      _socket!.on('ambulance-location-update', (data) {
+        if (mounted) _addAmbulanceMarker(LatLng(data['lat'], data['lng']));
+      });
+
+      _socket!.on('ambulance-route-update', (data) {
+        // --- NEW: Debug log ---
+        print("PATIENT: Received 'ambulance-route-update'");
+        if (mounted) {
+          final route = data['route'] as List<dynamic>;
+          if (route.isEmpty) {
+            print("PATIENT: Route is empty, clearing line.");
+            setState(() => _ambulanceRoutePoints = []);
+            return;
+          }
+          final points = route.map<LatLng>((p) => LatLng(p['lat'], p['lng'])).toList();
+          print("PATIENT: Setting new route with ${points.length} points.");
+          setState(() {
+            _ambulanceRoutePoints = points;
+          });
+        }
+      });
+      // --- END ---
+
+      _socket!.on('ride-finished', (_) {
+        print('PATIENT: Ride finished!');
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You have arrived!')));
+        _resetToBooking();
+      });
+
+      _socket!.connect(); // Explicitly connect
+
+    } catch (e) {
+      print("PATIENT: Error setting up socket connection: $e");
+    }
+  }
+
+  Future<void> _initializeCurrentLocation() async {
+    setState(() => _isLoading = true);
+    final hasPermission = await _checkAndRequestLocationPermission(context);
+    if (!hasPermission) {
+      _showErrorSnackBar("Location permission is required to use this app effectively.");
+      setState(() => _isLoading = false);
+      return;
+    }
+
+    try {
+      final position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      final place = Place('Current Location', LatLng(position.latitude, position.longitude));
+      setState(() {
+        _pickupPlace = place;
+        _pickupController.text = "Current Location";
+        _mapController.move(place.location, 14);
+      });
+    } catch (e) {
+      _showErrorSnackBar("Could not get current location. Please enable GPS.");
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   // --- UI Build Methods ---
   @override
   Widget build(BuildContext context) {
+
     return Scaffold(
       body: Stack(
         children: [
@@ -114,14 +197,28 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
             options: MapOptions(
               initialCenter: LatLng(12.9141, 74.8560),
               initialZoom: 13,
+              onTap: (_, __) => _clearAutocompleteFocus(),
             ),
             children: [
               TileLayer(
                 urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.example.patient_app',
+                errorTileCallback: (tile, error, stack) {
+                  print("Error loading map tile $tile: $error");
+                },
               ),
+              // The patient's original route (black)
               if (_routePoints.isNotEmpty)
                 PolylineLayer(polylines: [Polyline(points: _routePoints, color: Colors.black, strokeWidth: 5)]),
+
+              // The live ambulance route (solid green)
+              if (_ambulanceRoutePoints.isNotEmpty)
+                PolylineLayer(polylines: [Polyline(
+                  points: _ambulanceRoutePoints,
+                  color: Colors.green,
+                  strokeWidth: 6,
+                )]),
+
               MarkerLayer(markers: _markers),
               if (_ambulanceMarker != null) MarkerLayer(markers: [_ambulanceMarker!]),
             ],
@@ -143,7 +240,7 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
           Positioned(
             top: 50, right: 20,
             child: FloatingActionButton(
-              onPressed: _showEmergencyModal,
+              onPressed: _handleEmergencyButton,
               backgroundColor: Colors.red,
               heroTag: 'emergency_btn',
               child: const Icon(Icons.emergency, color: Colors.white),
@@ -243,6 +340,11 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
           onPressed: _handleConfirmBooking,
           child: const Text('Confirm Booking'),
         ),
+        const SizedBox(height: 10),
+        TextButton(
+          onPressed: _showCancelConfirmationDialog,
+          child: const Text('Cancel', style: TextStyle(color: Colors.red)),
+        ),
       ],
     );
   }
@@ -255,6 +357,12 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
         Text('Ambulance on its way!', style: Theme.of(context).textTheme.headlineSmall),
         const SizedBox(height: 15),
         Text(_driverInfo, style: Theme.of(context).textTheme.bodyLarge),
+        const SizedBox(height: 20),
+        ElevatedButton(
+          onPressed: _showCancelConfirmationDialog,
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+          child: const Text('Cancel Ride'),
+        ),
       ],
     );
   }
@@ -262,46 +370,106 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
   // --- Logic Methods ---
   Future<void> _handleFindRoute() async {
     if (_pickupPlace == null || _dropPlace == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a pickup and drop-off location.')));
+      _showErrorSnackBar('Please select a pickup and drop-off location.');
       return;
     }
     _displayRoute(_pickupPlace!, _dropPlace!);
   }
 
   Future<void> _displayRoute(Place start, Place end) async {
+    setState(() => _isLoading = true);
     final url = 'https://api.geoapify.com/v1/routing?waypoints=${start.location.latitude},${start.location.longitude}|${end.location.latitude},${end.location.longitude}&mode=drive&apiKey=$geoapifyApiKey';
-    final response = await http.get(Uri.parse(url));
 
-    if (response.statusCode == 200 && mounted) {
-      final decoded = jsonDecode(response.body);
-      final geometry = decoded['features'][0]['geometry']['coordinates'][0];
-      final points = geometry.map<LatLng>((p) => LatLng(p[1], p[0])).toList();
-      final eta = decoded['features'][0]['properties']['time'] / 60;
+    try {
+      final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
 
-      if (points.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not find a valid route.')));
-        return;
+      if (response.statusCode == 200 && mounted) {
+        final decoded = jsonDecode(response.body);
+
+        if (decoded['features'] == null || (decoded['features'] as List).isEmpty) {
+          throw Exception('Route geometry not found in response.');
+        }
+
+        final geometry = decoded['features'][0]['geometry']['coordinates'][0];
+        final points = geometry.map<LatLng>((p) => LatLng(p[1], p[0])).toList();
+        final eta = decoded['features'][0]['properties']['time'] / 60;
+
+        if (points.isEmpty) {
+          throw Exception('Calculated route has no points.');
+        }
+
+        setState(() {
+          _routePoints = points;
+          _ambulanceRoutePoints = []; // Clear any old ambulance routes
+          _markers = [
+            Marker(point: start.location, child: const Icon(Icons.person_pin_circle, color: Colors.blue, size: 40)),
+            Marker(point: end.location, child: const Icon(Icons.local_hospital, color: Colors.red, size: 40)),
+          ];
+          _etaMessage = 'Estimated Time: ${eta.ceil()} mins';
+          _currentState = AppState.confirmation;
+        });
+        await Future.delayed(const Duration(milliseconds: 50));
+        _mapController.fitCamera(CameraFit.coordinates(coordinates: points, padding: const EdgeInsets.all(150)));
+      } else {
+        throw Exception('Failed to fetch route. Status: ${response.statusCode}');
       }
-
-      setState(() {
-        _routePoints = points;
-        _markers = [
-          Marker(point: start.location, child: const Icon(Icons.person_pin_circle, color: Colors.blue, size: 40)),
-          Marker(point: end.location, child: const Icon(Icons.local_hospital, color: Colors.red, size: 40)),
-        ];
-        _etaMessage = 'Estimated Time: ${eta.ceil()} mins';
-        _currentState = AppState.confirmation;
-      });
-      _mapController.fitCamera(CameraFit.coordinates(coordinates: points, padding: const EdgeInsets.all(150)));
-    } else {
-      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error calculating route. Please try again.')));
+    } catch (e) {
+      print("Error in _displayRoute: $e");
+      _showErrorSnackBar('Error calculating route: ${e.toString().substring(0, min(e.toString().length, 100))}');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   void _handleConfirmBooking() {
+    if (_pickupPlace == null || _dropPlace == null) {
+      _showErrorSnackBar("Pickup or Dropoff location is missing.");
+      return;
+    }
     final route = SimpleRoute(_pickupPlace!, _dropPlace!);
-    _socket?.emit('request-booking', route.toJson());
-    setState(() { _etaMessage = "Searching for nearby drivers..."; });
+    _socket?.emit('request-booking', {
+      'route': route.toJson(),
+      'patientId': _myPermanentId // Send permanent ID
+    });
+    setState(() {
+      _etaMessage = "Searching for nearby drivers...";
+      // Hide the original black route to avoid clutter.
+      // The new green route will appear when the driver accepts.
+      _routePoints = [];
+    });
+  }
+
+  Future<void> _showCancelConfirmationDialog() async {
+    return showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Cancel Ride?'),
+          content: const Text('Are you sure you want to cancel this ride?'),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('No'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+            TextButton(
+              child: const Text('Yes, Cancel', style: TextStyle(color: Colors.red)),
+              onPressed: () {
+                Navigator.of(context).pop();
+                _handleCancelRide();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _handleCancelRide() {
+    // Send the permanent ID so the server knows *who* is cancelling
+    _socket?.emit('cancel-ride', { 'patientId': _myPermanentId });
+    _resetToBooking();
   }
 
   void _resetToBooking() {
@@ -309,6 +477,7 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
       _routePoints = [];
       _markers = [];
       _ambulanceMarker = null;
+      _ambulanceRoutePoints = [];
       _currentState = AppState.booking;
       _pickupController.clear();
       _dropoffController.clear();
@@ -316,7 +485,8 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
       _dropSuggestions.clear();
       _activeInputField = null;
     });
-    _mapController.move(LatLng(12.9141, 74.8560), 13);
+    // Re-initialize location after a ride is finished or canceled.
+    _initializeCurrentLocation();
   }
 
   void _addAmbulanceMarker(LatLng position) {
@@ -329,11 +499,20 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
   }
 
   // --- Autocomplete & Geolocation ---
+  void _clearAutocompleteFocus() {
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _pickupSuggestions.clear();
+      _dropSuggestions.clear();
+      _activeInputField = null;
+    });
+  }
+
   Widget _buildAutocompleteSection({
     required TextEditingController controller,
     required String hint,
     required List<Place> suggestions,
-    required Function(Place) onSelect,
+    required Function(Place?) onSelect,
     required String fieldType,
   }) {
     return Column(
@@ -345,9 +524,21 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
           decoration: InputDecoration(
             hintText: hint,
             prefixIcon: Icon(fieldType == 'pickup' ? Icons.my_location : Icons.flag),
+            suffixIcon: (controller.text.isNotEmpty)
+                ? IconButton(
+              icon: const Icon(Icons.clear),
+              onPressed: () {
+                controller.clear();
+                onSelect(null);
+                _clearAutocompleteFocus();
+              },
+            )
+                : null,
           ),
           onTap: () => setState(() => _activeInputField = fieldType),
           onChanged: (text) {
+            if (fieldType == 'pickup') onSelect(null); else onSelect(null);
+
             setState(() {
               _activeInputField = fieldType;
               if (fieldType == 'pickup') _pickupSuggestions.clear(); else _dropSuggestions.clear();
@@ -398,30 +589,39 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
 
   Future<void> _fetchAutocomplete(String text, String fieldType) async {
     final url = 'https://api.geoapify.com/v1/geocode/autocomplete?text=${Uri.encodeComponent(text)}&apiKey=$geoapifyApiKey';
-    final response = await http.get(Uri.parse(url));
-    if (response.statusCode == 200 && mounted) {
-      final features = jsonDecode(response.body)['features'] as List<dynamic>;
-      final places = features.map((f) {
-        final props = f['properties'];
-        return Place(props['formatted'], LatLng(props['lat'], props['lon']));
-      }).toList();
-      setState(() {
-        if (fieldType == "pickup") _pickupSuggestions = places;
-        else _dropSuggestions = places;
-      });
+    try {
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200 && mounted) {
+        final features = jsonDecode(response.body)['features'] as List<dynamic>;
+        final places = features.map((f) {
+          final props = f['properties'];
+          final lat = props['lat'];
+          final lon = props['lon'];
+          if (lat is num && lon is num) {
+            return Place(props['formatted'] ?? 'Unknown Address', LatLng(lat.toDouble(), lon.toDouble()));
+          }
+          return null;
+        }).whereType<Place>().toList();
+
+        setState(() {
+          if (fieldType == "pickup") _pickupSuggestions = places;
+          else _dropSuggestions = places;
+        });
+      } else {
+        print("Autocomplete failed: ${response.statusCode}");
+      }
+    } catch (e) {
+      print("Error fetching autocomplete: $e");
     }
   }
 
   // --- EMERGENCY MODAL LOGIC ---
-  Future<void> _showEmergencyModal() async {
-    final result = await showDialog<Place>(
-      context: context,
-      builder: (context) => const EmergencyModal(),
-    );
-
-    if (result != null) {
-      await _findNearestHospitalAndRoute(result);
+  Future<void> _handleEmergencyButton() async {
+    if (_pickupPlace == null) {
+      _showErrorSnackBar("Current location not found. Please wait or select a pickup location.");
+      return;
     }
+    await _findNearestHospitalAndRoute(_pickupPlace!);
   }
 
   Future<void> _findNearestHospitalAndRoute(Place pickup) async {
@@ -430,16 +630,23 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
       _pickupPlace = pickup;
     });
 
+    if (mounted) _showInfoSnackBar('Finding nearest hospital...');
+
     try {
       final hospital = await _findNearestHospital(pickup.location.latitude, pickup.location.longitude);
+
       if (hospital != null && mounted) {
-        setState(() => _dropPlace = hospital);
-        _displayRoute(pickup, hospital);
+        setState(() {
+          _dropPlace = hospital;
+          _dropoffController.text = hospital.name;
+        });
+        await _displayRoute(pickup, hospital);
       } else {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not find any hospitals near your location.')));
+        if (mounted) _showErrorSnackBar('Could not find any hospitals near your location.');
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error finding hospital route: $e')));
+      print("Error in _findNearestHospitalAndRoute: $e");
+      if (mounted) _showErrorSnackBar('Error finding hospital route: ${e.toString().substring(0, min(e.toString().length, 100))}');
     } finally {
       if(mounted) setState(() => _isLoading = false);
     }
@@ -448,14 +655,26 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
   Future<Place?> _findNearestHospital(double lat, double lng) async {
     // ATTEMPT 1: Geoapify (Primary)
     try {
-      final url = 'https://api.geoapify.com/v2/places?categories=healthcare.hospital,healthcare.clinic&filter=circle:$lng,$lat,25000&bias=proximity:$lng,$lat&limit=20&apiKey=$geoapifyApiKey';
-      final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 7));
+      final url = 'https://api.geoapify.com/v2/places?categories=healthcare.hospital,healthcare.clinic,healthcare.doctors&filter=circle:$lng,$lat,25000&bias=proximity:$lng,$lat&limit=20&apiKey=$geoapifyApiKey';
+      print("DEBUG: Geoapify Search URL: $url");
+      final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
+      print("DEBUG: Geoapify Response Status: ${response.statusCode}");
+
       if (response.statusCode == 200) {
-        final features = jsonDecode(response.body)['features'] as List<dynamic>;
+        final decoded = jsonDecode(response.body);
+        final features = decoded['features'] as List<dynamic>;
+        print("DEBUG: Geoapify Found ${features.length} places.");
         if (features.isNotEmpty) {
           final props = features.first['properties'];
-          return Place(props['address_line1'] ?? 'Nearby Hospital', LatLng(props['lat'], props['lon']));
+          print("DEBUG: Geoapify Closest: ${props['address_line1'] ?? props['name']}");
+          final hLat = props['lat'];
+          final hLon = props['lon'];
+          if (hLat is num && hLon is num) {
+            return Place(props['address_line1'] ?? props['name'] ?? 'Nearby Medical Facility', LatLng(hLat.toDouble(), hLon.toDouble()));
+          }
         }
+      } else {
+        print("DEBUG: Geoapify Error Body: ${response.body}");
       }
     } catch (e) {
       print('Geoapify hospital search failed: $e');
@@ -463,24 +682,44 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
 
     // ATTEMPT 2: Nominatim (Fallback)
     try {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Primary search failed. Trying backup...'), duration: Duration(seconds: 1)));
-      final url = 'https://nominatim.openstreetmap.org/search?q=hospital&format=jsonv2&limit=20&viewbox=${lng-0.2},${lat+0.2},${lng+0.2},${lat-0.2}&bounded=1';
-      final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 7));
+      if (mounted) _showInfoSnackBar('Primary search failed. Trying backup...');
+      double searchRadiusDegrees = 0.25;
+      double minLon = lng - searchRadiusDegrees;
+      double minLat = lat - searchRadiusDegrees;
+      double maxLon = lng + searchRadiusDegrees;
+      double maxLat = lat + searchRadiusDegrees;
+      final url = 'https://nominatim.openstreetmap.org/search?q=hospital&format=jsonv2&limit=20&viewbox=$minLon,$maxLat,$maxLon,$minLat&bounded=1';
+      print("DEBUG: Nominatim Search URL: $url");
+      final response = await http.get(Uri.parse(url), headers: {'User-Agent': 'com.example.patient_app'}).timeout(const Duration(seconds: 8));
+      print("DEBUG: Nominatim Response Status: ${response.statusCode}");
+
       if (response.statusCode == 200) {
         final results = jsonDecode(response.body) as List<dynamic>;
+        print("DEBUG: Nominatim Found ${results.length} places.");
         if (results.isNotEmpty) {
           Place? closest;
           double? minDistance;
           for(var result in results) {
-            final place = Place(result['display_name'], LatLng(double.parse(result['lat']), double.parse(result['lon'])));
-            final distance = Geolocator.distanceBetween(lat, lng, place.location.latitude, place.location.longitude);
-            if(minDistance == null || distance < minDistance) {
-              minDistance = distance;
-              closest = place;
+            if (result['lat'] != null && result['lon'] != null) {
+              try {
+                final placeLat = double.parse(result['lat']);
+                final placeLon = double.parse(result['lon']);
+                final place = Place(result['display_name'] ?? 'Unknown Hospital', LatLng(placeLat, placeLon));
+                final distance = Geolocator.distanceBetween(lat, lng, place.location.latitude, place.location.longitude);
+                if(minDistance == null || distance < minDistance) {
+                  minDistance = distance;
+                  closest = place;
+                }
+              } catch (parseError) {
+                print("Error parsing Nominatim result: $parseError");
+              }
             }
           }
+          print("DEBUG: Nominatim Closest: ${closest?.name}");
           return closest;
         }
+      } else {
+        print("DEBUG: Nominatim Error Body: ${response.body}");
       }
     } catch (e) {
       print('Nominatim hospital search failed: $e');
@@ -488,135 +727,41 @@ class _PatientAppScreenState extends State<PatientAppScreen> {
 
     return null; // Both searches failed
   }
-}
 
-// --- DEDICATED WIDGET FOR THE EMERGENCY MODAL ---
-class EmergencyModal extends StatefulWidget {
-  const EmergencyModal({Key? key}) : super(key: key);
-
-  @override
-  _EmergencyModalState createState() => _EmergencyModalState();
-}
-
-class _EmergencyModalState extends State<EmergencyModal> {
-  final _controller = TextEditingController();
-  List<Place> _suggestions = [];
-  Place? _selectedPlace;
-  Timer? _debounce;
-  bool _isLoadingLocation = false;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    _debounce?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _fetchAutocomplete(String text) async {
-    final url = 'https://api.geoapify.com/v1/geocode/autocomplete?text=${Uri.encodeComponent(text)}&apiKey=$geoapifyApiKey';
-    final response = await http.get(Uri.parse(url));
-    if (response.statusCode == 200 && mounted) {
-      final features = jsonDecode(response.body)['features'] as List<dynamic>;
-      setState(() {
-        _suggestions = features.map((f) {
-          final props = f['properties'];
-          return Place(props['formatted'], LatLng(props['lat'], props['lon']));
-        }).toList();
-      });
+  // --- Helper for showing SnackBars ---
+  void _showErrorSnackBar(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 3),
+      ));
     }
   }
-
-  Future<void> _handleUseCurrentLocation() async {
-    setState(() => _isLoadingLocation = true);
-    final hasPermission = await _checkLocationPermission(context);
-    if (!hasPermission) {
-      setState(() => _isLoadingLocation = false);
-      return;
+  void _showInfoSnackBar(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 2),
+      ));
     }
-
-    try {
-      final position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-      final place = Place('Current Location', LatLng(position.latitude, position.longitude));
-      if (mounted) Navigator.of(context).pop(place);
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not get current location.')));
-      setState(() => _isLoadingLocation = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Emergency Pickup'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _controller,
-            decoration: const InputDecoration(hintText: 'Enter pickup address...'),
-            onChanged: (text) {
-              if (_debounce?.isActive ?? false) _debounce!.cancel();
-              _debounce = Timer(const Duration(milliseconds: 300), () {
-                if (text.length > 2) _fetchAutocomplete(text);
-              });
-            },
-          ),
-          if (_suggestions.isNotEmpty)
-            SizedBox(
-              height: 100,
-              width: double.maxFinite,
-              child: ListView.builder(
-                itemCount: _suggestions.length,
-                itemBuilder: (context, index) {
-                  final place = _suggestions[index];
-                  return ListTile(
-                    title: Text(place.name, style: const TextStyle(fontSize: 14)),
-                    onTap: () {
-                      setState(() {
-                        _controller.text = place.name;
-                        _selectedPlace = place;
-                        _suggestions.clear();
-                      });
-                    },
-                  );
-                },
-              ),
-            ),
-          const SizedBox(height: 20),
-          ElevatedButton(
-            onPressed: () {
-              if (_selectedPlace != null) {
-                Navigator.of(context).pop(_selectedPlace);
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select an address.')));
-              }
-            },
-            child: const Text('Find Nearest Hospital'),
-          ),
-          const SizedBox(height: 10),
-          _isLoadingLocation
-              ? const CircularProgressIndicator()
-              : TextButton(
-            onPressed: _handleUseCurrentLocation,
-            child: const Text('Use My Current Location'),
-          ),
-        ],
-      ),
-      actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel'))],
-    );
   }
 }
 
 // --- Top-level helper function for checking permissions ---
-Future<bool> _checkLocationPermission(BuildContext context) async {
+Future<bool> _checkAndRequestLocationPermission(BuildContext context) async {
   bool serviceEnabled;
   LocationPermission permission;
   serviceEnabled = await Geolocator.isLocationServiceEnabled();
   if (!serviceEnabled) {
-    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location services are disabled.')));
+    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Location services are disabled. Please enable them in settings.')));
     return false;
   }
+
+  // --- *** THIS IS THE FIX *** ---
   permission = await Geolocator.checkPermission();
+  // --- *** END OF FIX *** ---
+
   if (permission == LocationPermission.denied) {
     permission = await Geolocator.requestPermission();
     if (permission == LocationPermission.denied) {
@@ -630,4 +775,3 @@ Future<bool> _checkLocationPermission(BuildContext context) async {
   }
   return true;
 }
-

@@ -25,7 +25,9 @@ dependencies:
   geolocator: ^14.0.2
 
   # For real-time communication with the server
-  socket_io_client: ^2.0.3+1
+  socket_io_client: ^3.1.2
+
+  uuid: ^4.4.0 
 
 dev_dependencies:
   flutter_test:

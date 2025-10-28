@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-900">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ambulance Fleet Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        /* Custom styles for Leaflet and layout */
+        #map {
+            height: 100%;
+            width: 100%;
+            background-color: #374151; /* gray-700 */
+        }
+        /* Leaflet popup dark mode theme */
+        .leaflet-popup-content-wrapper {
+            background: #1F2937; /* gray-800 */
+            color: #F9FAFB; /* gray-50 */
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }
+        .leaflet-popup-content {
+            margin: 14px 20px;
+        }
+        .leaflet-popup-tip {
+            background: #1F2937;
+        }
+        .leaflet-container a.leaflet-popup-close-button {
+            color: #F9FAFB;
+        }
+        /* Ensure the app is full height */
+        .h-screen-layout {
+            height: calc(100vh - 64px); /* 100% viewport height minus header height */
+        }
+        
+        /* --- NEW: Style for the general view button --- */
+        #general-view-btn {
+            position: absolute;
+            top: 90px;
+            right: 20px;
+            z-index: 400; /* Leaflet is 400 */
+            background-color: white;
+            color: #1F2937; /* gray-800 */
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-weight: 600;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            cursor: pointer;
+        }
+        #general-view-btn:hover {
+            background-color: #f3f4f6; /* gray-100 */
+        }
+    </style>
+</head>
+<body class="h-full overflow-hidden">
+    
+    <div class="flex flex-col h-screen">
+        <header class="bg-gray-800 shadow-md">
+            <nav class="container mx-auto px-6 py-4 flex justify-between items-center">
+                <h1 class="text-2xl font-bold text-white">Ambulance Fleet Dashboard</h1>
+            </nav>
+        </header>
+
+        <div class="flex-1 flex overflow-hidden h-screen-layout">
+            
+            <aside class="w-1/3 max-w-sm bg-gray-800 shadow-lg overflow-y-auto" style="min-width: 300px;">
+                <div class="p-5 border-b border-gray-700">
+                    <h2 class="text-xl font-semibold text-white">Online Drivers</h2>
+                    <p class="text-gray-400 text-sm">Click a driver to zoom to their location</p>
+                </div>
+                <div id="driver-list" class="divide-y divide-gray-700">
+                    <div id="no-drivers-message" class="p-6 text-center text-gray-500">
+                        <p>No drivers currently online.</p>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="flex-1 bg-gray-700 relative">
+                <div id="map"></div>
+                <button id="general-view-btn">General View</button>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        // --- Global State ---
+        let map;
+        const fleet = {}; // Stores driver data, markers, and now route lines
+        let ambulanceIcon;
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            initMap();
+            initIcons();
+            initSocket();
+
+            // --- NEW: Add listener for the General View button ---
+            document.getElementById('general-view-btn').onclick = () => {
+                clearAllRoutes();
+                map.setView([12.9141, 74.8560], 12); // Reset to default view
+            };
+        });
+
+        function initMap() {
+            map = L.map('map').setView([12.9141, 74.8560], 12); // Default to Mangaluru
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            }).addTo(map);
+        }
+
+        // --- Create a custom icon for the ambulance ---
+        function initIcons() {
+            const iconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-8 h-8 text-red-500">
+                <path fill-rule="evenodd" d="M11.986 3.63a1 1 0 00-1.972 0H3.34A1.34 1.34 0 002 4.97V11a1 1 0 001 1h.25a.75.75 0 010 1.5H3a1 1 0 00-1 1v1.03A1.34 1.34 0 003.34 17h13.32A1.34 1.34 0 0018 15.66V15a1 1 0 00-1-1h-.25a.75.75 0 010-1.5H17a1 1 0 001-1V4.97A1.34 1.34 0 0016.66 3.63h-6.674zM9 10.5a.75.75 0 000 1.5h2a.75.75 0 000-1.5H9zM8.25 7h3.5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0V9h-1.25V8.5a.75.75 0 01.75-.75h.5V7a.75.75 0 010-1.5h-1a.75.75 0 01-.75-.75V5.5a.75.75 0 011.5 0v.75H10a.75.75 0 01.75.75v.5h.5a.75.75 0 01.75.75V8h-.5a.75.75 0 01-.75-.75V7a.75.75 0 010-1.5h-1.5a.75.75 0 01-.75.75v.75H9a.75.75 0 01-.75.75v3a.75.75 0 01-1.5 0v-3A.75.75 0 018.25 7zM4.5 14.5a.75.75 0 100-1.5.75.75 0 000 1.5zM15.5 14.5a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
+            </svg>`;
+            
+            ambulanceIcon = L.divIcon({
+                html: `<div class="w-8 h-8 text-red-500">${iconSVG}</div>`,
+                className: '',
+                iconSize: [32, 32],
+                iconAnchor: [16, 16],
+                popupAnchor: [0, -16]
+            });
+        }
+        
+        // --- Socket.IO Connection & Listeners ---
+        function initSocket() {
+            // FIX: Connect to 'localhost' because this page runs in your PC's browser,
+            // not in the emulator.
+            const socket = io('http://localhost:3000'); 
+
+            socket.on('connect', () => {
+                console.log('Dashboard connected to server with ID:', socket.id);
+                socket.emit('dashboard-online');
+            });
+
+            // Receives the initial list of all drivers
+            socket.on('fleet-snapshot', (drivers) => {
+                console.log('Received fleet snapshot:', drivers);
+                drivers.forEach(driver => addOrUpdateDriver(driver));
+            });
+
+            // Receives updates for a single driver (new, or status change)
+            socket.on('driver-update', (driver) => {
+                console.log('Driver update:', driver);
+                addOrUpdateDriver(driver);
+            });
+
+            // Receives live location updates for the fleet
+            socket.on('fleet-location-update', (data) => {
+                const { driverId, location } = data;
+                if (!location) return; // Ignore updates without a location
+
+                if (!fleet[driverId]) {
+                    // If driver isn't in our list, add them (edge case)
+                    addOrUpdateDriver({ id: driverId, location: location, status: 'on-ride' });
+                }
+                
+                const driver = fleet[driverId];
+                const latLng = [location.lat, location.lng];
+                driver.location = latLng;
+
+                if (driver.marker) {
+                    driver.marker.setLatLng(latLng);
+                } else {
+                    // --- MODIFIED: Add click handler when creating marker ---
+                    driver.marker = L.marker(latLng, { icon: ambulanceIcon })
+                        .addTo(map)
+                        .bindPopup(driver.name || driver.id)
+                        .on('click', () => handleMarkerClick(driverId)); 
+                }
+            });
+
+            // --- NEW: Receives route updates for drivers ---
+            socket.on('fleet-route-update', (data) => {
+                const { driverId, route, driverState } = data;
+                console.log(`Received route for ${driverId}: ${route.length} points`);
+                if (fleet[driverId]) {
+                    fleet[driverId].route = route;
+                    fleet[driverId].driverState = driverState;
+                    
+                    // If this driver's route is currently displayed, update it
+                    if (fleet[driverId].routeLine) {
+                        // This handles rerouting
+                        fleet[driverId].routeLine.remove();
+                        handleMarkerClick(driverId);
+                    }
+                }
+            });
+
+            // Receives when a driver disconnects entirely
+            socket.on('driver-disconnected', (data) => {
+                console.log('Driver disconnected:', data.driverId);
+                removeDriver(data.driverId);
+            });
+        }
+
+        // --- NEW: Helper function to draw the route ---
+        function handleMarkerClick(driverId) {
+            const driver = fleet[driverId];
+            if (!driver) return;
+            
+            // Clear any other routes first
+            clearAllRoutes();
+
+            // --- *** THIS IS THE FIX *** ---
+            // Check if driver is on *any* ride and has a route
+            const isOnRide = driver.driverState === 'DriverState.enRouteToDropoff' || 
+                             driver.driverState === 'DriverState.enRouteToPickup';
+            
+            if (isOnRide && driver.route && driver.route.length > 0) {
+            // --- *** END OF FIX *** ---
+
+                // Convert route data to Leaflet's format [[lat, lng], ...]
+                const latLngs = driver.route.map(p => [p.lat, p.lng]);
+
+                // Create and store the route line
+                driver.routeLine = L.polyline(latLngs, { 
+                    color: '#3498db', // A nice blue
+                    weight: 5,
+                    opacity: 0.8
+                }).addTo(map);
+
+                // Zoom the map to fit the route
+                map.fitBounds(driver.routeLine.getBounds(), { padding: [50, 50] });
+            } else {
+                 // If not on a ride, just zoom to the driver
+                 map.setView([driver.location.lat, driver.location.lng], 16, { animate: true });
+            }
+        }
+
+        // --- NEW: Helper function to clear all routes ---
+        function clearAllRoutes() {
+            for (const id in fleet) {
+                if (fleet[id].routeLine) {
+                    fleet[id].routeLine.remove();
+                    fleet[id].routeLine = null;
+                }
+            }
+        }
+
+        // --- UI & Map Management Functions ---
+        function addOrUpdateDriver(driver) {
+            const driverId = driver.id;
+            if (!driverId) return;
+
+            const isNew = !fleet[driverId];
+            
+            // 1. Update (or create) the driver in our state
+            // --- MODIFIED: Ensure new properties are initialized ---
+            const oldData = fleet[driverId] || {};
+            fleet[driverId] = {
+                ...oldData,
+                ...driver,
+                route: driver.route || oldData.route || [],
+                driverState: driver.driverState || oldData.driverState || 'DriverState.waiting',
+                routeLine: oldData.routeLine || null
+            };
+
+            // 2. Update (or create) their map marker
+            if (driver.location) {
+                const latLng = [driver.location.lat, driver.location.lng];
+                if (fleet[driverId].marker) {
+                    fleet[driverId].marker.setLatLng(latLng);
+                } else {
+                    // --- MODIFIED: Add click handler when creating marker ---
+                    fleet[driverId].marker = L.marker(latLng, { icon: ambulanceIcon })
+                        .addTo(map)
+                        .bindPopup(driver.name || driverId)
+                        .on('click', () => handleMarkerClick(driverId)); // Add click listener
+                }
+            }
+
+            // 3. Update (or create) their card in the sidebar list
+            const list = document.getElementById('driver-list');
+            document.getElementById('no-drivers-message')?.remove(); // Remove "no drivers" message
+
+            let card = document.getElementById(`driver-${driverId}`);
+            if (!card) {
+                card = document.createElement('div');
+                card.id = `driver-${driverId}`;
+                card.className = "p-4 cursor-pointer hover:bg-gray-700";
+                card.setAttribute('data-id', driverId);
+                card.onclick = () => {
+                    // --- MODIFIED: Clicking sidebar card also calls handleMarkerClick ---
+                    handleMarkerClick(driverId);
+                };
+                list.appendChild(card);
+            }
+
+            const statusColor = driver.status === 'available' ? 'bg-green-500' : 'bg-yellow-500';
+            const statusText = driver.status === 'available' ? 'Available' : 'On Ride';
+            
+            card.innerHTML = `
+                <div class="flex justify-between items-center">
+                    <p class="font-semibold text-white">${driver.name || driverId.substring(0, 8)}</p>
+                    <span class="px-2 py-1 text-xs font-bold text-white rounded-full ${statusColor}">${statusText}</span>
+                </div>
+                <p class="text-sm text-gray-400">${driver.vehicle || 'No Vehicle Info'}</p>
+            `;
+        }
+
+        function removeDriver(driverId) {
+            if (fleet[driverId]) {
+                // --- MODIFIED: Remove marker and route line ---
+                fleet[driverId].marker?.remove();
+                fleet[driverId].routeLine?.remove();
+                
+                // Remove card from list
+                document.getElementById(`driver-${driverId}`)?.remove();
+                // Remove from state
+                delete fleet[driverId];
+            }
+
+            const list = document.getElementById('driver-list');
+            if (list.children.length === 0) {
+                 list.innerHTML = `
+                    <div id="no-drivers-message" class="p-6 text-center text-gray-500">
+                        <p>No drivers currently online.</p>
+                    </div>
+                 `;
+            }
+        }
+
+    </script>
+
+</body>
+</html>
